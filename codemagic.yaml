@@ -1,0 +1,157 @@
+workflows:
+  ios_appstore_manual_signing:
+    name: iOS App Store Manual signing
+    max_build_duration: 60
+
+    environment:
+      groups:
+        - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD, MOBILEPROVISION
+        - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
+      vars:
+        XCODE_PROJECT: "Rubin.xcodeproj"   # или задай XCODE_WORKSPACE вместо XCODE_PROJECT
+        XCODE_SCHEME: "Rubin"
+        BUNDLE_ID: "com.rubbin.bobrovnuk"
+        TEAM_ID: "OVERRIDE_BY_PROFILE"        # заменится значением из профиля
+        EXPORT_METHOD: "app-store"
+        # APP_VERSION: "1.1"                  # ← опционально, если хочешь поднять маркетинговую версию
+        # APP_BUILD: "123"                    # ← опционально, если хочешь задать build вручную (иначе timestamp)
+
+    scripts:
+      - name: Import certificate and provisioning profile
+        script: |
+          set -euo pipefail
+
+          # --- Подхватываем секреты с разными именами (оба варианта поддержаны) ---
+          CERT_P12_B64="${CERTIFICATE_P12:-${CERT_P12:-}}"
+          CERT_PWD="${CERTIFICATE_PASSWORD:-${CERT_PASSWORD:-}}"
+          PROFILE_B64="${MOBILEPROVISION:-${PROFILE_MOBILEPROVISION:-}}"
+
+          # Проверки с понятными сообщениями
+          [ -n "$CERT_P12_B64" ] || { echo "❌ Missing CERTIFICATE_P12 (или CERT_P12) в группе 'signing' — это base64 вашего .p12"; exit 1; }
+          [ -n "$PROFILE_B64" ]  || { echo "❌ Missing MOBILEPROVISION (или PROFILE_MOBILEPROVISION) — это base64 вашего .mobileprovision (App Store)"; exit 1; }
+
+          # Files from secrets
+          echo "$CERT_P12_B64" | base64 --decode > cert.p12
+          echo "$PROFILE_B64"  | base64 --decode > profile.mobileprovision
+
+          # Keychain + certificate
+          keychain initialize
+          if [ -n "$CERT_PWD" ]; then
+            keychain add-certificates --certificate cert.p12 --certificate-password "$CERT_PWD"
+          else
+            keychain add-certificates --certificate cert.p12
+          fi
+
+          # Install profile and extract UUID + TeamIdentifier
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PLIST="$(security cms -D -i profile.mobileprovision)"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PROFILE_PLIST")
+          PROFILE_TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print TeamIdentifier:0' /dev/stdin <<< "$PROFILE_PLIST")
+
+          cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "Using Provisioning Profile UUID: $PROFILE_UUID"
+          echo "TeamIdentifier from profile: $PROFILE_TEAM_ID"
+
+          # export to env for next steps
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$CM_ENV"
+          echo "TEAM_ID=$PROFILE_TEAM_ID"   >> "$CM_ENV"
+
+          # Resolve correct signing identity (Apple Distribution или iPhone Distribution)
+          DIST_IDENTITY=$(security find-identity -v -p codesigning | sed -nE 's/.*"((Apple|iPhone) Distribution:.*)"/\1/p' | head -n1 || true)
+          if [ -z "$DIST_IDENTITY" ]; then
+            echo "❌ Distribution identity not found in keychain"
+            security find-identity -v -p codesigning || true
+            exit 1
+          fi
+          echo "DIST_IDENTITY=$DIST_IDENTITY" >> "$CM_ENV"
+          echo "Using signing identity: $DIST_IDENTITY"
+
+          # Diagnostics
+          echo "== Code signing identities in keychain =="; security find-identity -v -p codesigning || true
+
+          # exportOptions.plist (manual)
+          cat > exportOptions.plist <<EOI
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>${EXPORT_METHOD}</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
+            </dict>
+            <key>stripSwiftSymbols</key><true/>
+            <key>destination</key><string>export</string>
+          </dict>
+          </plist>
+          EOI
+          /usr/bin/plutil -lint exportOptions.plist
+
+          # Apply profile into the project (manual signing)
+          xcode-project use-profiles --project "$XCODE_PROJECT" --export-options-plist exportOptions.plist
+
+      - name: "Prepare versions (no Info.plist)"
+        script: |
+          set -euo pipefail
+
+          # Всегда новый build; можно переопределить APP_BUILD в UI
+          BUILD_NUM="${APP_BUILD:-$(date +%y%j%H%M%S)}"
+          echo "BUILD_NUM=$BUILD_NUM" >> "$CM_ENV"
+
+          # APP_VERSION берётся из UI (если нужна смена маркетинговой версии)
+          if [ -n "${APP_VERSION:-}" ]; then
+            echo "APP_VERSION=$APP_VERSION" >> "$CM_ENV"
+          fi
+
+          echo "== Planned versions =="
+          echo "MARKETING_VERSION=${APP_VERSION:-(unchanged)}"
+          echo "CURRENT_PROJECT_VERSION=$BUILD_NUM"
+
+      - name: "Archive and export IPA (xcodebuild)"
+        script: |
+          ARCHIVE_PATH="$CM_BUILD_DIR/Rubin.xcarchive"
+          EXPORT_PATH="$CM_EXPORT_DIR"
+
+          # Доп. флаги версий прямо в xcodebuild (работает без Info.plist)
+          EXTRA_FLAGS=( CURRENT_PROJECT_VERSION="$BUILD_NUM" )
+          if [ -n "${APP_VERSION:-}" ]; then
+            EXTRA_FLAGS+=( MARKETING_VERSION="$APP_VERSION" )
+          fi
+
+          echo "Archiving to: $ARCHIVE_PATH"
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -archivePath "$ARCHIVE_PATH" \
+            archive \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            "${EXTRA_FLAGS[@]}"
+
+          echo "Exporting IPA to: $EXPORT_PATH"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportOptionsPlist exportOptions.plist \
+            -exportPath "$EXPORT_PATH"
+
+          echo "Export dir listing:"
+          ls -lah "$EXPORT_PATH" || true
+          test -e "$EXPORT_PATH"/*.ipa
+
+    artifacts:
+      - $CM_EXPORT_DIR/*.ipa
+      - $CM_EXPORT_DIR/*.dSYM.zip
+      - $CM_EXPORT_DIR/*.xcarchive
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
