@@ -1,0 +1,24 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserdatad
+*.xcscmblueprint
+*.xccheckout
+
+# iOS
+*.ipa
+*.dSYM*
+*.xcarchive
+
+# CocoaPods
+Pods/
+Podfile.lock
+
+# Signing
+*.p12
+*.mobileprovision
+*.p8
+
+# Misc
+.idea/
+.DS_Store
