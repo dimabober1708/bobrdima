@@ -8,9 +8,9 @@ workflows:
         - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD, MOBILEPROVISION
         - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
-        XCODE_PROJECT: "Rubin.xcodeproj"   # или задай XCODE_WORKSPACE вместо XCODE_PROJECT
-        XCODE_SCHEME: "Rubin"
-        BUNDLE_ID: "com.rubbin.bobrovnuk"
+        XCODE_PROJECT: "Project-22-12-25-1.xcodeproj"   # или задай XCODE_WORKSPACE вместо XCODE_PROJECT
+        XCODE_SCHEME: "Project-22-12-25-1"
+        BUNDLE_ID: "com.choice.bobrovnu"
         TEAM_ID: "OVERRIDE_BY_PROFILE"        # заменится значением из профиля
         EXPORT_METHOD: "app-store"
         # APP_VERSION: "1.1"                  # ← опционально, если хочешь поднять маркетинговую версию
@@ -111,7 +111,7 @@ workflows:
 
       - name: "Archive and export IPA (xcodebuild)"
         script: |
-          ARCHIVE_PATH="$CM_BUILD_DIR/Rubin.xcarchive"
+          ARCHIVE_PATH="$CM_BUILD_DIR/Project-22-12-25-1.xcarchive"
           EXPORT_PATH="$CM_EXPORT_DIR"
 
           # Доп. флаги версий прямо в xcodebuild (работает без Info.plist)
